@@ -3,8 +3,10 @@ numpy
 langchain
 langchain-openai
 langchain-community
+langchain-experimental
 faiss-cpu
 gradio
 python-dotenv
 openpyxl
+
 
