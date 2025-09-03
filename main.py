@@ -5,7 +5,6 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-# --- NEW: Import the pandas agent ---
 from langchain.agents.agent_types import AgentType
 from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 import re
@@ -275,3 +274,4 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Excel AI Query System") as demo:
 
 if __name__ == "__main__":
     demo.launch(share=True)
+
