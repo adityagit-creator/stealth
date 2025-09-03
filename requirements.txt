@@ -8,3 +8,6 @@ faiss-cpu
 gradio
 python-dotenv
 openpyxl
+gunicorn
+uvicorn
+
