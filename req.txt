@@ -1,0 +1,9 @@
+pandas>=2.0.0
+numpy>=1.24.0
+openai>=1.0.0
+langchain==0.2.12
+langchain-community==0.2.11
+faiss-cpu>=1.7.4
+openpyxl>=3.1.0
+typing-extensions>=4.5.0
+tqdm>=4.65.0
