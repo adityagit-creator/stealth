@@ -5,11 +5,8 @@ from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.agents.agent_types import AgentType
-from langchain_experimental.agents.agent_toolkits import create_pandas_dataframe_agent
 import re
 import os
-import io
 from typing import Dict, List, Any
 import warnings
 import gradio as gr
@@ -22,12 +19,11 @@ load_dotenv()
 
 class ExcelAIQuerySystem:
     """
-    An improved system to query Excel files using a Pandas Agent for higher accuracy.
+    A system to query Excel files using natural language, powered by OpenAI and LangChain.
     """
     def __init__(self, openai_api_key: str):
         os.environ["OPENAI_API_KEY"] = openai_api_key
-        # Use a more capable model for agent tasks if possible, but OpenAI() is fine.
-        self.llm = OpenAI(temperature=0) 
+        self.llm = OpenAI(temperature=0)
         self.embeddings = OpenAIEmbeddings()
         self.excel_data = {}
         self.sheet_descriptions = {}
@@ -62,52 +58,36 @@ class ExcelAIQuerySystem:
             raise Exception(f"Error loading Excel file: {str(e)}")
 
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Cleans a DataFrame by removing empty rows/columns, standardizing headers, and converting types."""
+        """Cleans a DataFrame by removing empty rows/columns and converting data types."""
         df = df.dropna(how='all').dropna(axis=1, how='all').reset_index(drop=True)
-        # --- MODIFIED: Standardize column names for easier querying by the agent ---
-        df.columns = df.columns.str.strip().str.replace(r'[^a-zA-Z0-9_]', '_', regex=True)
         for col in df.columns:
             if df[col].dtype == 'object':
                 try:
                     df[col] = pd.to_datetime(df[col], errors='ignore')
-                except: pass
+                except:
+                    pass
                 try:
                     df[col] = pd.to_numeric(df[col], errors='ignore')
-                except: pass
+                except:
+                    pass
         return df
 
     def _generate_sheet_description(self, sheet_name: str, df: pd.DataFrame) -> str:
-        """--- MODIFIED: Generates a richer, more detailed description of a DataFrame for better retrieval. ---"""
-        # Use an in-memory buffer to capture dataframe info
-        buffer = io.StringIO()
-        df.info(buf=buffer)
-        df_info = buffer.getvalue()
-        
-        # Get summary statistics for numerical columns
-        df_head = df.head(3).to_string()
-        summary_stats = df.describe().to_string()
-
+        """Generates a text description of a DataFrame using an LLM."""
+        sample_data = df.head(3).to_string()
         prompt = f"""
-        Analyze the metadata of this Excel sheet to provide a concise, one-paragraph summary.
-        
+        Analyze this Excel sheet and provide a concise one-paragraph summary.
         Sheet Name: {sheet_name}
+        Columns: {list(df.columns)}
+        Sample Data:
+        {sample_data}
         
-        Dataframe Info (columns, data types, non-null counts):
-        {df_info}
-        
-        Summary Statistics for numerical columns:
-        {summary_stats}
-        
-        First 3 Rows of Data:
-        {df_head}
-        
-        Based on all the metadata above, summarize the sheet's main purpose, the types of data it contains, key metrics, and the general time period or scope.
+        Focus on the main purpose of the data, key metrics, and the time period covered.
         """
         try:
             return self.llm.invoke(prompt)
         except Exception:
             return f"Sheet: {sheet_name}, Columns: {', '.join(list(df.columns))}"
-
 
     def _create_vectorstore(self):
         """Creates a FAISS vector store from sheet descriptions for similarity search."""
@@ -124,16 +104,15 @@ class ExcelAIQuerySystem:
         if not self.vectorstore:
             return list(self.excel_data.keys())
         try:
-            # Retrieve more documents to increase the chance of finding the right context
-            docs = self.vectorstore.similarity_search(query, k=5)
+            docs = self.vectorstore.similarity_search(query, k=3)
             sheet_names = [doc.metadata['sheet_name'] for doc in docs if 'sheet_name' in doc.metadata]
-            return list(dict.fromkeys(sheet_names))
+            return list(dict.fromkeys(sheet_names))[:5]
         except Exception:
             return list(self.excel_data.keys())
 
     def query_data(self, query: str) -> Dict[str, Any]:
-        """--- MODIFIED: Processes a user query using a Pandas Agent for accurate, code-driven analysis. ---"""
-        results = {'query': query, 'relevant_sheets': [], 'sheet_results': {}, 'summary': ''}
+        """Processes a user query against the loaded Excel data."""
+        results = {'query': query, 'relevant_sheets': [], 'sheet_results': {}, 'summary': '', 'insights': []}
         try:
             relevant_sheets = self.identify_relevant_sheets(query)
             results['relevant_sheets'] = relevant_sheets
@@ -141,50 +120,57 @@ class ExcelAIQuerySystem:
             for sheet_name in relevant_sheets:
                 if sheet_name not in self.excel_data:
                     continue
-                
                 df = self.excel_data[sheet_name]
+                analysis_prompt = f"""
+                Analyze the data from sheet '{sheet_name}' to answer the query: "{query}"
+                Columns: {list(df.columns)}
+                Sample Data:
+                {df.head(5).to_string()}
                 
-                # Create a Pandas Agent for the current DataFrame
-                pandas_agent = create_pandas_dataframe_agent(
-                    self.llm,
-                    df,
-                    agent_type=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
-                    verbose=True # Set to True to see the agent's thought process in the terminal
-                )
-                
-                # Run the query through the agent
-                response = pandas_agent.invoke(query)
-                results['sheet_results'][sheet_name] = {'response': response['output']}
+                Provide a direct answer, including key numbers, trends, or patterns.
+                """
+                response = self.llm.invoke(analysis_prompt)
+                results['sheet_results'][sheet_name] = {'response': response}
             
             results['summary'] = self._generate_summary(query, results['sheet_results'])
+            results['insights'] = self._extract_insights(results['sheet_results'])
             return results
         except Exception as e:
-            results['summary'] = f"An error occurred while querying the data: {str(e)}"
+            results['summary'] = f"Error processing query: {str(e)}"
             return results
 
     def _generate_summary(self, query: str, sheet_results: Dict) -> str:
         """Generates a final, consolidated summary from individual sheet analyses."""
         if not sheet_results:
-            return "No relevant data found to answer the query in the identified sheets."
+            return "No relevant data found to answer the query."
         
-        # If only one sheet was relevant, just return its answer directly.
-        if len(sheet_results) == 1:
-            return list(sheet_results.values())[0]['response']
-
         combined_responses = "\n\n".join(
             f"--- Analysis from Sheet '{name}' ---\n{res['response']}"
             for name, res in sheet_results.items()
         )
         prompt = f"""
-        The following are answers to the query "{query}" from different data sheets. Synthesize them into a single, cohesive final answer. If the answers contradict, point this out. If they complement each other, combine them.
+        Based on the following analyses, provide a final, consolidated answer to the query.
+        Original Query: {query}
         
         {combined_responses}
         
-        Provide a final, consolidated answer based on the analysis above.
+        Synthesize these findings into a clear and direct summary.
         """
         return self.llm.invoke(prompt)
 
-# --- Gradio Interface (No changes needed here) ---
+    def _extract_insights(self, sheet_results: Dict) -> List[str]:
+        """Extracts simple, actionable insights from the analysis results."""
+        insights = set()
+        for sheet_name, result in sheet_results.items():
+            response = result.get('response', '').lower()
+            if re.search(r'\b\d+\.?\d*\b', response):
+                insights.add(f"Numerical data found in '{sheet_name}'")
+            trend_keywords = ['increase', 'decrease', 'growth', 'decline', 'trend', 'pattern']
+            if any(keyword in response for keyword in trend_keywords):
+                insights.add(f"Trend analysis available in '{sheet_name}'")
+        return list(insights)
+
+# --- Gradio Interface ---
 
 def process_file(api_key, file_obj):
     """Gradio function to load the file and prepare the system."""
@@ -217,18 +203,23 @@ def generate_response(query, system_state):
         result = system_state.query_data(query)
         summary = result.get('summary', 'No summary available.')
         sheets = ", ".join(result.get('relevant_sheets', []))
+        insights = ", ".join(result.get('insights', []))
         
-        details = f"**🔍 Relevant Sheets Identified:**\n{sheets}"
+        details = f"**🔍 Relevant Sheets Identified:**\n{sheets}\n\n"
+        if insights:
+            details += f"**💡 Key Insights:**\n{insights}"
             
         return summary, details
     except Exception as e:
         raise gr.Error(f"Error during query: {e}")
 
+# --- UI Layout ---
+
 with gr.Blocks(theme=gr.themes.Soft(), title="Excel AI Query System") as demo:
     system_state = gr.State(None)
 
-    gr.Markdown("# 📊 Excel AI Query System (High-Accuracy Agent)")
-    gr.Markdown("Upload an Excel file, and ask questions about your data. This version uses an AI agent for more precise analysis.")
+    gr.Markdown("# 📊 Excel AI Query System")
+    gr.Markdown("Upload an Excel file, and ask questions about your data in plain English.")
 
     with gr.Row():
         with gr.Column(scale=1):
@@ -241,13 +232,13 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Excel AI Query System") as demo:
             )
             file_input = gr.File(label="Upload Excel File", file_types=[".xlsx", ".xls"])
             load_button = gr.Button("Load File", variant="primary")
-            status_output = gr.Textbox(label="Loading Status", interactive=False, lines=10)
+            status_output = gr.Textbox(label="Loading Status", interactive=False, lines=5)
         
         with gr.Column(scale=2):
             gr.Markdown("### 2. Ask a Question")
             query_input = gr.Textbox(
                 label="Your Question", 
-                placeholder="e.g., 'What is the average revenue?' or 'How many sales were made in New Delhi?'",
+                placeholder="e.g., 'What were the total sales in Q3?' or 'Show me the performance trend for Product X.'",
                 visible=False
             )
             ask_button = gr.Button("Get Answer", variant="primary", visible=False)
@@ -257,6 +248,8 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Excel AI Query System") as demo:
                 summary_output = gr.Markdown(label="Summary")
                 details_output = gr.Markdown(label="Details")
 
+    # --- Event Handlers ---
+    
     load_button.click(
         fn=process_file,
         inputs=[api_key_input, file_input],
@@ -272,6 +265,13 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Excel AI Query System") as demo:
         outputs=results_accordion
     )
 
-if __name__ == "__main__":
-    demo.launch(share=True)
+# --- Change this line ---
+# if __name__ == "__main__":
+#     demo.launch(share=True)
 
+# --- To this ---
+if __name__ == "__main__":
+    # Render provides the PORT environment variable
+    port = int(os.environ.get('PORT', 10000))
+    # Launch on 0.0.0.0 to make it accessible outside the container
+    demo.launch(server_name="0.0.0.0", server_port=port)
